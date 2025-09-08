@@ -1,41 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-body_extractor.py
------------------
-從 OCR 文字抽取臺灣制式公文欄位，並重點擷取「正文 / 內文」。
-
-使用方式：
-    from body_extractor import extract_fields_and_body
-
-    result = extract_fields_and_body(raw_text)
-    print(result["subject"])
-    print(result["body"])
+body_extractor_compat.py
+------------------------
+把原始 extract_body.py 的正文抽取邏輯「原封不動」抽出成可重用函式。
+目標：輸出與原程式一致的結果，不做任何「更聰明」的變更。
 
 介面：
-    extract_fields_and_body(
-        text: str,
-        field_aliases: Optional[Dict[str, List[str]]] = None
-    ) -> Dict[str, Any]
-
-回傳：
-    {
-      "subject": str,
-      "body": str,
-      "attachment": str,
-      "meta": {
-         "recipient": str, "doc_no": str, "date": str,
-         "priority": str, "security": str
-      }
-    }
+    extract_fields_and_body(text: str) -> Dict[str, Any]
+    extract_body(text: str) -> str
 """
-from __future__ import annotations
 
 import re
 from typing import Dict, Tuple, List, Optional, Any
 
-# -------- 1) 欄位別名與容錯正規化 --------
+# ===== 1) 欄位別名與容錯正規化（與原版保持一致） =====
 
-DEFAULT_FIELD_ALIASES: Dict[str, List[str]] = {
+FIELD_ALIASES = {
     "recipient":  ["受文者", "受文機關", "受文單位"],
     "doc_no":     ["發文字號", "文號", "案號", "來文字號"],
     "date":       ["發文日期", "日期", "中華民國"],
@@ -56,7 +36,7 @@ CANONICAL_REPLACEMENTS = [
     ("－", "-"), ("—", "-"), ("–", "-"),
 ]
 
-def _normalize_text(raw: str) -> str:
+def normalize_text(raw: str) -> str:
     text = raw
     for a, b in CANONICAL_REPLACEMENTS:
         text = text.replace(a, b)
@@ -65,26 +45,26 @@ def _normalize_text(raw: str) -> str:
     cleaned = []
     for ln in lines:
         s = ln.strip()
-        # 橫線/頁碼/分隔等雜訊
         if re.fullmatch(r"-{3,}|_{3,}|=+|~+|\d+/\d+|第\d+頁", s):
             continue
-        # 行首序號雜訊（OCR 常見）
         s = re.sub(r"^\s*\(?\d{1,3}\)?\s+", "", s)
         cleaned.append(s)
     return "\n".join(cleaned)
 
-def _build_field_regex(field_aliases: Dict[str, List[str]]) -> re.Pattern:
+def build_field_regex() -> re.Pattern:
     names: List[str] = []
-    for _, alias in field_aliases.items():
+    for _, alias in FIELD_ALIASES.items():
         names.extend(alias)
     names = sorted(set(names), key=lambda x: -len(x))
     pattern = r"^(?P<field>(" + "|".join(map(re.escape, names)) + r"))\s*:?\s*(?P<after>.*)$"
     return re.compile(pattern, flags=re.MULTILINE)
 
-# -------- 2) 基礎段落切分與對應 --------
+FIELD_PATTERN = build_field_regex()
 
-def _split_sections(text: str, field_pattern: re.Pattern) -> Dict[str, str]:
-    matches = list(field_pattern.finditer(text))
+# ===== 2) 與原版一致的切段/對應 =====
+
+def split_sections(text: str) -> Dict[str, str]:
+    matches = list(FIELD_PATTERN.finditer(text))
     if not matches:
         return {}
     sections: Dict[str, str] = {}
@@ -101,23 +81,22 @@ def _split_sections(text: str, field_pattern: re.Pattern) -> Dict[str, str]:
             sections[field_name] = block
     return sections
 
-def _canonicalize_keys(sections_raw: Dict[str, str],
-                       field_aliases: Dict[str, List[str]]) -> Dict[str, str]:
+def canonicalize_keys(sections: Dict[str, str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
-    for canon, aliases in field_aliases.items():
+    for canon, aliases in FIELD_ALIASES.items():
         for a in aliases:
-            if a in sections_raw and sections_raw[a].strip():
-                out[canon] = sections_raw[a].strip()
+            if a in sections and sections[a].strip():
+                out[canon] = sections[a].strip()
                 break
     return out
 
-def _span_of_field(field_cn: str, text: str, field_pattern: re.Pattern) -> Optional[Tuple[int, int]]:
+def _span_of_field(field_cn: str, text: str) -> Optional[Tuple[int, int]]:
     pat = re.compile(r"^" + re.escape(field_cn) + r"\s*:?\s*(.*)$", flags=re.MULTILINE)
     m = pat.search(text)
     if not m:
         return None
     start = m.end()
-    nxt = field_pattern.search(text, pos=start)
+    nxt = FIELD_PATTERN.search(text, pos=start)
     end = nxt.start() if nxt else len(text)
     return (start, end)
 
@@ -127,74 +106,42 @@ def _middle_block(text: str) -> str:
         return ""
     return text[int(n * 0.2): int(n * 0.8)]
 
-# -------- 3) 正文（body）啟發式 --------
+# ===== 3) 與原版一致的正文啟發式 =====
 
-def _heuristic_body(text: str,
-                    sections_raw: Dict[str, str],
-                    sections: Dict[str, str],
-                    field_aliases: Dict[str, List[str]],
-                    field_pattern: re.Pattern) -> str:
-    # 3.1 若已抽到 body 類欄位，直接用
+def heuristic_body(text: str, sections_raw: Dict[str, str], sections: Dict[str, str]) -> str:
     if "body" in sections and sections["body"].strip():
         return sections["body"].strip()
 
-    # 3.2 主旨之後、附件/副本/聯絡之前的內容
-    tail_markers = field_aliases.get("attachment", []) + \
-                   field_aliases.get("cc", []) + \
-                   field_aliases.get("contact", [])
+    tail_markers = FIELD_ALIASES["attachment"] + FIELD_ALIASES["cc"] + FIELD_ALIASES["contact"]
 
-    subject_aliases = field_aliases.get("subject", ["主旨"])
-    subject_span = None
-    for sub in subject_aliases:
-        subject_span = _span_of_field(sub, text, field_pattern)
-        if subject_span:
-            break
-
+    # 注意：原版只用「主旨」這個字樣來抓 span，不嘗試其他別名
+    subject_span = _span_of_field("主旨", text)
     if subject_span:
         start = subject_span[1]
         tail_positions = []
         for t in tail_markers:
-            sp = _span_of_field(t, text, field_pattern)
+            sp = _span_of_field(t, text)
             if sp and sp[0] > start:
                 tail_positions.append(sp[0])
         end = min(tail_positions) if tail_positions else len(text)
         body = text[start:end].strip()
-        body = re.sub(field_pattern, "", body).strip()
+        body = re.sub(FIELD_PATTERN, "", body).strip()
         if body:
             return body
 
-    # 3.3 條列(一)(二)…作為正文開頭
     m = re.search(r"^[（(]?(一|二|三|四|五|六|七|八|九|十)[)）]?[、.．]", text, flags=re.MULTILINE)
     if m:
         return text[m.start():].strip()
 
-    # 3.4 退而求其次：取中段
     return _middle_block(text).strip()
 
-# -------- 4) 對外主函式 --------
+# ===== 4) 對外 API =====
 
-def extract_fields_and_body(
-    text: str,
-    *,
-    field_aliases: Optional[Dict[str, List[str]]] = None
-) -> Dict[str, Any]:
-    """
-    從原始 OCR 文字抽取主旨/正文與常見欄位。
-
-    Args:
-        text: 原始字串（建議傳入 OCR 原文，不含檔案 I/O）
-        field_aliases: 自訂欄位別名（不傳則用 DEFAULT_FIELD_ALIASES）
-
-    Returns:
-        結構化 dict（見檔頭說明）
-    """
-    aliases = field_aliases or DEFAULT_FIELD_ALIASES
-    norm = _normalize_text(text)
-    field_pattern = _build_field_regex(aliases)
-
-    sections_raw = _split_sections(norm, field_pattern)
-    sections = _canonicalize_keys(sections_raw, aliases)
-    body = _heuristic_body(norm, sections_raw, sections, aliases, field_pattern)
+def extract_fields_and_body(text: str) -> Dict[str, Any]:
+    norm = normalize_text(text)
+    sections_raw = split_sections(norm)
+    sections = canonicalize_keys(sections_raw)
+    body = heuristic_body(norm, sections_raw, sections)
 
     return {
         "subject": sections.get("subject", ""),
@@ -209,4 +156,5 @@ def extract_fields_and_body(
         }
     }
 
-__all__ = ["extract_fields_and_body", "DEFAULT_FIELD_ALIASES"]
+def extract_body(text: str) -> str:
+    return extract_fields_and_body(text).get("body", "")
