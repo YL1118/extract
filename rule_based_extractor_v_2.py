@@ -52,10 +52,10 @@ LINE_WEIGHTS = {0: 1.0, 1: 0.7, 2: 0.5, 3: 0.3}  # line distance → base weight
 TAU_COL = 12.0      # column distance scale (in characters)
 
 # Scoring weights
-W_LABEL = 0.7
-W_FORMAT = 1.2
-W_DIST = 0.8
-W_DIR = 0.2
+W_LABEL = 0.3
+W_FORMAT = 0.9
+W_DIST = 1.6
+W_DIR = 0.4
 W_CONTEXT = 0.2
 W_PENALTY = 0.8
 
@@ -65,6 +65,8 @@ NAME_GIVEN_MAX = 3
 NAME_SEPARATORS = "·．• "  # middle-dot variants
 NAME_BLACKLIST_NEAR = {"公司", "單位", "科", "處", "部", "電話", "分機", "地址", "附件", "銀行", "分行", "室", "股", "隊", "路", "段", "號", "樓", "市", "縣", "鄉", "鎮", "村", "里"}
 HONORIFICS = {"先生","小姐","女士","太太","老師","主管","經理","博士"}
+# common non-name bigrams that often appear right after labels; exclude as given-name
+BIGRAM_BLACKLIST = {"應於","基準","查詢","調查","名單","身分","證號","統編","日期","時間","銀行","公司","單位","地址","電話"}
 
 # Batch ID strict binding to label required
 RE_BATCH_13 = re.compile(r"\b\d{13}\b")
@@ -157,10 +159,15 @@ def normalize_text(s: str) -> List[str]:
     - Collapse spaces per line (not across lines)
     - normalized by ChatGPT
     """
-    s = to_halfwidth(s).replace("\r\n", "\n").replace("\r", "\n")
-    lines = s.split("\n")
+    s = to_halfwidth(s).replace("
+", "
+").replace("
+", "
+")
+    lines = s.split("
+")
     # collapse only spaces/tabs/ideographic spaces within each line
-    lines = [re.sub(r"[ \t\u3000]+", " ", line) for line in lines]
+    lines = [re.sub(r"[ 	　]+", " ", line) for line in lines]
     return lines
 
 
@@ -347,6 +354,8 @@ def name_candidates_from_text(line_text: str, surname_singles: Set[str], surname
             if i + L <= n and text[i:i+L] == ds:
                 given, col = next_two_cjk_after(i + L)
                 if given:
+                    if given in BIGRAM_BLACKLIST:
+                        continue
                     cands.append((ds + given, i))
                 matched = True
                 break
@@ -357,6 +366,8 @@ def name_candidates_from_text(line_text: str, surname_singles: Set[str], surname
         if ch in surname_singles:
             given, col = next_two_cjk_after(i + 1)
             if given:
+                if given in BIGRAM_BLACKLIST:
+                    continue
                 cands.append((ch + given, i))
     return cands
 
