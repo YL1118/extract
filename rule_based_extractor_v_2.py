@@ -63,7 +63,7 @@ W_PENALTY = 0.8
 # Name rules
 NAME_GIVEN_MIN = 1
 NAME_GIVEN_MAX = 3
-NAME_SEPARATORS = "·．•"  # middle-dot variants
+NAME_SEPARATORS = "·．• "  # middle-dot variants
 NAME_BLACKLIST_NEAR = {"公司", "單位", "科", "處", "部", "電話", "分機", "地址", "附件"}
 
 # Batch ID strict binding to label required
@@ -152,16 +152,14 @@ def to_halfwidth(s: str) -> str:
 
 
 def normalize_text(s: str) -> List[str]:
-    """Normalize and split into lines, preserving line text.
-    - Halfwidth
-    - Normalize spaces
+    """Normalize and split into lines, preserving line breaks.
+    - Halfwidth normalization
+    - Collapse spaces per line (not across lines)
     """
-    s = to_halfwidth(s)
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    # standardize spaces around colons / parentheses
-    s = re.sub(r"\s+", " ", s)
-    # restore line breaks (we collapsed spaces globally; re-split by original newlines)
+    s = to_halfwidth(s).replace("\r\n", "\n").replace("\r", "\n")
     lines = s.split("\n")
+    # collapse only spaces/tabs/ideographic spaces within each line
+    lines = [re.sub(r"[ \t\u3000]+", " ", line) for line in lines]
     return lines
 
 
@@ -313,7 +311,7 @@ def name_candidates_from_text(line_text: str, surname_singles: Set[str], surname
     """Return list of (name, col) candidates found in a line using surname rules."""
     cands: List[Tuple[str,int]] = []
     # scan tokens; also try sliding windows to catch glued text
-    for m in re.finditer(rf"[{CJK_RANGE}{NAME_SEPARATORS}]{{2,6}}", line_text):
+    for m in re.finditer(rf"[{CJK_RANGE}{NAME_SEPARATORS}]{{2,8}}", line_text):
         frag = m.group(0)
         # try double surname first
         matched = None
@@ -331,20 +329,27 @@ def name_candidates_from_text(line_text: str, surname_singles: Set[str], surname
                 rest = frag[1:]
                 rest = rest.lstrip(NAME_SEPARATORS)
                 if NAME_GIVEN_MIN <= len(rest) <= NAME_GIVEN_MAX and is_cjk(rest):
-                    matched = sur + rest
-        if matched:
-            # blacklist proximity: penalize if blacklist word appears near
+                    matched = sur + rif matched:
+            # strengthen filtering to reduce false positives
+            compact = matched.replace(" ", "").replace("·", "").replace("．", "").replace("•", "")
+            if not (2 <= len(compact) <= 4):
+                continue
+            if not is_cjk(compact):
+                continue
+            cands.append((matched, m.start()))eplace("·", "").replace("．", "").replace("•", "")
+            if not (2 <= len(compact) <= 4):
+                continue
+            if not is_cjk(compact):
+                continue
             cands.append((matched, m.start()))
     return cands
 
 
-def find_field_candidates_around_label(field: str, label: LabelHit, lines: List[str], surname_singles: Set[str], surname_doubles: Set[str]) -> List[Candidate]:
-    """Generate candidates for a field around a label occurrence."""
-    results: List[Candidate] = []
-    label_line_text = lines[label.line]
-
-    def add_candidate(value: str, vcol: int, line: int, dir_key: str, fmt_conf: float) -> None:
+def find_field_candidates_around_label(field: str, label: LabelHit, lines: List[sdef add_candidate(value: str, vcol: int, line: int, dir_key: str, fmt_conf: float) -> None:
         dist = distance_score(label.col, vcol, line - label.line)
+        # drop candidates that are too far from the label
+        if dist < 0.2:
+            return
         dir_prior = DIRECTION_PRIOR.get(dir_key, 0.0)
         cand = Candidate(
             field=field,
@@ -359,13 +364,18 @@ def find_field_candidates_around_label(field: str, label: LabelHit, lines: List[
             dir_prior=dir_prior,
             dist_score=dist,
         )
-        results.append(cand)
+        results.append(cand)           label_line=label.line,
+            label_col=label.col,
+            source_label=label.label_text,
+            format_conf=fmt_conf,
+            label_conf=1.0 - min(label.distance, 1) * 0.5,  # exact:1.0, edit1:0.5
+            dir_prior=dir_prior,
 
     # Same line: right side
     right_seg = label_line_text[label.col:]
     if field == "name":
         for name, c in name_candidates_from_text(right_seg, surname_singles, surname_doubles):
-            add_candidate(name, label.col + right_seg.find(name), label.line, "same_right", fmt_conf=0.8)
+            add_candidate(name, label.col + c, label.line, "same_right", fmt_conf=0.8)
     elif field == "id_no":
         for m in re.finditer(r"[A-Z][0-9]{9}|[A-Z]{2}[0-9]{8}", right_seg):
             code = m.group(0)
@@ -456,7 +466,7 @@ def group_records(all_cands: Dict[str, List[Candidate]]) -> List[Record]:
             if line_delta > MAX_DOWN_LINES:  # strict window for grouping
                 continue
             dist = distance_score(anchor.col, c.col, c.line - anchor.line)
-            s = dist + 0.2 * c.score()  # small bias by intrinsic score
+        mall bias by intrinsic score
             if s > best_s:
                 best_s, best = s, c
         return best
@@ -466,7 +476,7 @@ def group_records(all_cands: Dict[str, List[Candidate]]) -> List[Record]:
     if id_anchors:
         used_cands: Set[Candidate] = set()
         for a in id_anchors:
-            name_c = nearest("name", a)
+    
             date_c = nearest("ref_date", a)
             batch_c = nearest("batch_id", a)
             rec = assemble_record(name_c, a, date_c, batch_c, all_cands)
