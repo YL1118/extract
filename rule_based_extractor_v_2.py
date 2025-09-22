@@ -314,38 +314,55 @@ def distance_score(label_col: int, cand_col: int, line_delta: int, tau: float = 
 
 
 def name_candidates_from_text(line_text: str, surname_singles: Set[str], surname_doubles: Set[str]) -> List[Tuple[str, int]]:
-    """Return list of (name, col) candidates found in a line using surname rules."""
+    """Return list of (name, col) candidates using the policy:
+    - Find the nearest surname (double first, then single)
+    - Take the next **two** CJK characters as the given name, skipping separators (space/·/．/•)
+    This avoids missing names when they are glued to other tokens; we no longer require total length 2–4.
+    """
     cands: List[Tuple[str,int]] = []
-    # scan tokens; also try sliding windows to catch glued text
-    for m in re.finditer(rf"[{CJK_RANGE}{NAME_SEPARATORS}]{{2,8}}", line_text):
-        frag = m.group(0)
+    text = line_text
+    n = len(text)
+    sep_set = set(NAME_SEPARATORS)
+
+    def next_two_cjk_after(start: int) -> Tuple[Optional[str], Optional[int]]:
+        j = start
+        # skip separators after surname
+        while j < n and text[j] in sep_set:
+            j += 1
+        given = []
+        col = j
+        while j < n and len(given) < 2:
+            ch = text[j]
+            if RE_CJK.fullmatch(ch):
+                given.append(ch)
+                j += 1
+            else:
+                break
+        if len(given) == 2:
+            return ("".join(given), col)
+        return (None, None)
+
+    # scan across the line; prefer double surnames
+    doubles_sorted = sorted(surname_doubles, key=len, reverse=True)
+    for i in range(n):
         # try double surname first
-        matched = None
-        for ds in sorted(surname_doubles, key=len, reverse=True):
-            if frag.startswith(ds):
-                rest = frag[len(ds):]
-                rest = rest.lstrip(NAME_SEPARATORS)
-                if  NAME_GIVEN_MIN <= len(rest) <= NAME_GIVEN_MAX and is_cjk(rest):
-                    matched = ds + rest
-                    break
-        if not matched and frag:
-            # single surname
-            sur = frag[0]
-            if sur in surname_singles:
-                rest = frag[1:]
-                rest = rest.lstrip(NAME_SEPARATORS)
-                if NAME_GIVEN_MIN <= len(rest) <= NAME_GIVEN_MAX and is_cjk(rest):
-                    matched = sur + rest
+        matched = False
+        for ds in doubles_sorted:
+            L = len(ds)
+            if i + L <= n and text[i:i+L] == ds:
+                given, col = next_two_cjk_after(i + L)
+                if given:
+                    cands.append((ds + given, i))
+                matched = True
+                break
         if matched:
-            # strengthen filtering to reduce false positives
-            compact = matched.replace(" ", "").replace("·", "").replace("．", "").replace("•", "")
-            if not (2 <= len(compact) <= 4):
-                continue
-            if not is_cjk(compact):
-                continue
-            if any(h in matched for h in HONORIFICS):
-                continue
-            cands.append((matched, m.start()))
+            continue
+        # try single surname
+        ch = text[i]
+        if ch in surname_singles:
+            given, col = next_two_cjk_after(i + 1)
+            if given:
+                cands.append((ch + given, i))
     return cands
 
 
