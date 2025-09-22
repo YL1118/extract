@@ -41,10 +41,9 @@ LABELS: Dict[str, List[str]] = {
 
 # Direction priors (you may customize per field if desired)
 DIRECTION_PRIOR = {
-    # same line, right of label; same line, left of label; below lines (1..K)
-    "same_right": 1.0,
-    "same_left": 0.8,
-    "below": 1.0,  # multiplied with line distance weight below
+    "same_right": 1.2,
+    "same_left": 0.9,
+    "below": 0.6,
 }
 
 # Distance model
@@ -156,16 +155,12 @@ def normalize_text(s: str) -> List[str]:
     """Normalize and split into lines, preserving line breaks.
     - Halfwidth normalization
     - Collapse spaces per line (not across lines)
+    - normalized by ChatGPT
     """
-    s = to_halfwidth(s).replace("
-", "
-").replace("
-", "
-")
-    lines = s.split("
-")
+    s = to_halfwidth(s).replace("\r\n", "\n").replace("\r", "\n")
+    lines = s.split("\n")
     # collapse only spaces/tabs/ideographic spaces within each line
-    lines = [re.sub(r"[ 	　]+", " ", line) for line in lines]
+    lines = [re.sub(r"[ \t\u3000]+", " ", line) for line in lines]
     return lines
 
 
@@ -372,26 +367,24 @@ def find_field_candidates_around_label(field: str, label: LabelHit, lines: List[
     label_line_text = lines[label.line]
 
     def add_candidate(value: str, vcol: int, line: int, dir_key: str, fmt_conf: float) -> None:
-        dist = distance_score(label.col, vcol, line - label.line)
         line_delta = line - label.line
         col_delta = abs(vcol - label.col)
-        # stricter thresholds for names
+        dist = distance_score(label.col, vcol, line_delta)
+
         if field == "name":
-            if dist < 0.35:
+            # Hard distance window: enforce proximity
+            if line_delta == 0 and col_delta > 14:
                 return
-            if line_delta == 0 and col_delta > 24:
+            if line_delta != 0 and col_delta > 10:
                 return
-            if line_delta != 0 and col_delta > 16:
+            if abs(line_delta) > 1:
                 return
-            # nearby blacklist hard drop
-            window = lines[line]
-            lft = max(0, vcol - 8); rgt = min(len(window), vcol + 8)
-            nearby = window[lft:rgt]
-            if any(b in nearby for b in NAME_BLACKLIST_NEAR):
+            if dist < 0.5:
                 return
         else:
             if dist < 0.2:
                 return
+
         dir_prior = DIRECTION_PRIOR.get(dir_key, 0.0)
         cand = Candidate(
             field=field,
@@ -402,7 +395,7 @@ def find_field_candidates_around_label(field: str, label: LabelHit, lines: List[
             label_col=label.col,
             source_label=label.label_text,
             format_conf=fmt_conf,
-            label_conf=1.0 - min(label.distance, 1) * 0.5,  # exact:1.0, edit1:0.5
+            label_conf=1.0 - min(label.distance, 1) * 0.5,
             dir_prior=dir_prior,
             dist_score=dist,
         )
@@ -505,7 +498,7 @@ def group_records(all_cands: Dict[str, List[Candidate]]) -> List[Record]:
             if line_delta > MAX_DOWN_LINES:  # strict window for grouping
                 continue
             dist = distance_score(anchor.col, c.col, c.line - anchor.line)
-            s = dist + 0.2 * c.score()  # small bias by intrinsic score
+            s = (dist * 3.0) + (0.3 * c.format_conf) + (0.2 * c.dir_prior) - (0.3 * c.penalty)  # small bias by intrinsic score
             if s > best_s:
                 best_s, best = s, c
         return best
@@ -513,7 +506,7 @@ def group_records(all_cands: Dict[str, List[Candidate]]) -> List[Record]:
     id_anchors = sorted(all_cands.get("id_no", []), key=lambda c: (c.line, c.col))
 
     if id_anchors:
-                for a in id_anchors:
+        for a in id_anchors:
             name_c = nearest("name", a)
             date_c = nearest("ref_date", a)
             batch_c = nearest("batch_id", a)
